@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
-import { PageTitle, StatusBadge, WaitPill } from "../components/widgets.jsx";
+import { useLive } from "../hooks/useLive.js";
+import { PageTitle, StatusBadge, LiveBadge, ShiftBanner } from "../components/widgets.jsx";
 
 export default function Directory() {
   const [clinics, setClinics] = useState([]);
   const [specialities, setSpecialities] = useState([]);
-  const [doctors, setDoctors] = useState([]);
   const [spec, setSpec] = useState("");
   const [clinic, setClinic] = useState("");
 
@@ -15,16 +15,24 @@ export default function Directory() {
     api.specialities().then(setSpecialities);
   }, []);
 
-  useEffect(() => {
-    api.doctors({ speciality: spec, clinic }).then(setDoctors);
-  }, [spec, clinic]);
+  const { data, live } = useLive(
+    () => api.doctors({ speciality: spec, clinic }),
+    { interval: 5000 }
+  );
+  const doctors = data?.items ?? [];
+  const { data: shiftInfo } = useLive(() => api.shifts(), { interval: 15000 });
 
   return (
     <div>
-      <PageTitle
-        title="Find a Doctor"
-        subtitle="Browse by specialty and clinic branch — see live queue length before you book."
-      />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <PageTitle
+          title="Find a Doctor"
+          subtitle="Browse by specialty and clinic branch — see live queue length before you book."
+        />
+        <LiveBadge live={live} />
+      </div>
+
+      <ShiftBanner shifts={shiftInfo?.shifts} current={shiftInfo?.current} />
 
       <div className="mb-5 flex flex-wrap gap-3">
         <select className="input max-w-xs" value={spec} onChange={(e) => setSpec(e.target.value)}>

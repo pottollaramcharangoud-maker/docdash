@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, usePoll } from "../api.js";
-import { PageTitle, StatusBadge, TokenRing } from "../components/widgets.jsx";
+import { api } from "../api.js";
+import { useLive } from "../hooks/useLive.js";
+import { PageTitle, StatusBadge, TokenRing, LiveBadge } from "../components/widgets.jsx";
 
 export default function DoctorConsole() {
   const { doctorId } = useParams();
@@ -11,27 +12,25 @@ export default function DoctorConsole() {
   const [shift, setShift] = useState("MORNING");
   const [flash, setFlash] = useState(null);
   const [rx, setRx] = useState({ notes: "", fileName: "", fileBase64: "" });
-  const [activeId, setActiveId] = useState(null);
   const fileRef = useRef();
 
   useEffect(() => {
-    api.doctors().then(setDoctors);
+    api.doctors({ limit: 50 }).then((d) => setDoctors(d.items ?? d));
   }, []);
 
   useEffect(() => {
     if (doctorId) setSelected(doctorId);
   }, [doctorId]);
 
-  const { data: q, error } = usePoll(() => api.queue(selected, shift), 3000);
-  const { data: active } = usePoll(
-    () => fetch(`/api/doctors/${selected}/active?shift=${shift}`).then((r) => r.json()),
-    3000
-  );
-
-  useEffect(() => {
-    setActiveId(active?.id ?? null);
-    if (!active?.id) setRx({ notes: "", fileName: "", fileBase64: "" });
-  }, [active?.id]);
+  const { data: q, error, live } = useLive(() => api.queue(selected, shift), {
+    interval: 3000,
+    doctorId: Number(selected),
+  });
+  const { data: active } = useLive(() => api.active(selected, shift), {
+    interval: 3000,
+    doctorId: Number(selected),
+  });
+  const activeId = active?.id ?? null;
 
   function say(msg, tone = "ok") {
     setFlash({ msg, tone });
@@ -53,12 +52,19 @@ export default function DoctorConsole() {
     setRx({ notes: "", fileName: "", fileBase64: "" });
   }
 
+  useEffect(() => {
+    if (!activeId) setRx({ notes: "", fileName: "", fileBase64: "" });
+  }, [activeId]);
+
   return (
     <div>
-      <PageTitle
-        title="Doctor Consultation Console"
-        subtitle="Call next patient, manage delays, skip no-shows — patient screens update within 3 seconds."
-      />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <PageTitle
+          title="Doctor Consultation Console"
+          subtitle="Call next patient, manage delays, skip no-shows — patient screens update instantly."
+        />
+        <LiveBadge live={live} />
+      </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <select
@@ -119,6 +125,7 @@ export default function DoctorConsole() {
               </span>
             )}
             <p className="text-xs text-slate-400">Avg {q.avgMins} min · EWMA last-5</p>
+            <p className="text-[10px] uppercase tracking-wide text-slate-300">{q.date} · {q.phase}</p>
           </div>
 
           <div className="card space-y-3 lg:col-span-2">
@@ -132,7 +139,7 @@ export default function DoctorConsole() {
               </button>
               <button
                 className="btn-ghost !py-3"
-                onClick={() => act(() => api.complete(selected, shift), "✔ Marked completed")}
+                onClick={() => act(() => api.complete(selected), "✔ Marked completed")}
               >
                 ✔ Mark Completed
               </button>
@@ -216,6 +223,7 @@ export default function DoctorConsole() {
                 <input
                   ref={fileRef}
                   type="file"
+                  accept=".pdf,.png,.jpg,.jpeg"
                   className="hidden"
                   onChange={(e) => {
                     const f = e.target.files?.[0];

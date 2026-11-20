@@ -1,6 +1,7 @@
 import { useParams, Link } from "react-router-dom";
-import { api, usePoll } from "../api.js";
-import { PageTitle, StatusBadge, TokenRing } from "../components/widgets.jsx";
+import { api } from "../api.js";
+import { useLive } from "../hooks/useLive.js";
+import { PageTitle, StatusBadge, TokenRing, LiveBadge, ShiftBanner } from "../components/widgets.jsx";
 
 const days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 
@@ -21,7 +22,12 @@ function Clock() {
 export default function QueueBoard() {
   const { doctorId } = useParams();
   const shift = new Date().getHours() < 14 ? "MORNING" : "EVENING";
-  const { data: q, error } = usePoll(() => api.queue(doctorId, shift), 3000);
+
+  const { data: q, error, live } = useLive(() => api.queue(doctorId, shift), {
+    interval: 3000,
+    doctorId: Number(doctorId),
+  });
+  const { data: shiftInfo } = useLive(() => api.shifts(), { interval: 20000 });
 
   if (error) return <p className="text-rose-600">{error}</p>;
   if (!q) return <p className="text-slate-400">Loading board…</p>;
@@ -33,8 +39,13 @@ export default function QueueBoard() {
           title={`${q.doctor.clinic_name} — ${q.doctor.clinic_branch}`}
           subtitle={`${q.doctor.name} · ${q.doctor.speciality} · ${shift} shift`}
         />
-        <Clock />
+        <div className="flex items-center gap-3">
+          <LiveBadge live={live} />
+          <Clock />
+        </div>
       </div>
+
+      <ShiftBanner shifts={shiftInfo?.shifts} current={shiftInfo?.current} />
 
       <div className="grid gap-5 lg:grid-cols-3">
         <div className="card flex flex-col items-center justify-center gap-3 lg:col-span-1">
@@ -48,12 +59,15 @@ export default function QueueBoard() {
             </span>
           )}
           <p className="text-xs text-slate-400">Avg {q.avgMins} min / consult</p>
+          <p className="text-[10px] uppercase tracking-wide text-slate-300">{q.date} · phase: {q.phase}</p>
         </div>
 
         <div className="card lg:col-span-2">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="font-bold text-slate-900">Next in line</h3>
-            <span className="text-xs text-slate-400">Live · updates every 3s</span>
+            <span className="text-xs text-slate-400">
+              {live ? "Socket.io push" : "Polling every 3s"}
+            </span>
           </div>
           <ul className="divide-y divide-slate-100">
             {q.nextTokens.map((t, i) => (

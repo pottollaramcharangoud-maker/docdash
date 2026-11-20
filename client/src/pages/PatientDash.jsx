@@ -1,14 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, usePoll } from "../api.js";
-import { PageTitle, StatusBadge, TokenRing, WaitPill } from "../components/widgets.jsx";
+import { api } from "../api.js";
+import { useLive } from "../hooks/useLive.js";
+import { PageTitle, StatusBadge, TokenRing, WaitPill, LiveBadge, ShiftBanner } from "../components/widgets.jsx";
 
 export default function PatientDash() {
   const { id } = useParams();
-  const { data: apt, error } = usePoll(() => api.appointment(id), 3000);
   const [smsToast, setSmsToast] = useState(null);
   const [checkin, setCheckin] = useState(null);
   const lastSms = useRef(null);
+
+  const { data: apt, error, live } = useLive(() => api.appointment(id), {
+    interval: 3000,
+  });
+  const { data: shiftInfo } = useLive(() => api.shifts(), { interval: 20000 });
 
   // simulated SMS popup when fresh alert arrives
   useEffect(() => {
@@ -33,7 +38,7 @@ export default function PatientDash() {
     if (!navigator.geolocation) return finish(undefined, undefined);
     navigator.geolocation.getCurrentPosition(
       (pos) => finish(pos.coords.latitude, pos.coords.longitude),
-      () => finish(undefined, undefined) // denied => manual check-in accepted
+      () => finish(undefined, undefined)
     );
   }
 
@@ -44,13 +49,18 @@ export default function PatientDash() {
 
   return (
     <div>
-      <PageTitle
-        title={`Token #${apt.tokenNo}`}
-        subtitle={`${apt.doctorName} · ${apt.speciality} · ${apt.clinicName} — ${apt.clinicBranch}`}
-      />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <PageTitle
+          title={`Token #${apt.tokenNo}`}
+          subtitle={`${apt.doctorName} · ${apt.speciality} · ${apt.clinicName} — ${apt.clinicBranch} · ${apt.slotDate}`}
+        />
+        <LiveBadge live={live} />
+      </div>
+
+      <ShiftBanner shifts={shiftInfo?.shifts} current={shiftInfo?.current} />
 
       {smsToast && (
-        <div className="mb-4 flex items-start justify-between gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 shadow-lg animate-[fadeIn]">
+        <div className="mb-4 flex items-start justify-between gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 shadow-lg">
           <div>
             <p className="text-xs font-bold uppercase tracking-wide text-amber-600">📩 Simulated SMS sent</p>
             <p className="mt-1 text-sm text-amber-900">{smsToast}</p>
@@ -83,7 +93,11 @@ export default function PatientDash() {
             <p className="text-sm font-medium text-emerald-600">You are with the doctor now.</p>
           )}
           {apt.status === "COMPLETED" && <p className="text-sm text-slate-500">Consultation complete. Get well soon!</p>}
-          {apt.status === "SKIPPED" && <p className="text-sm text-rose-500">Token marked absent/skipped.</p>}
+          {(apt.status === "SKIPPED" || apt.status === "MISSED") && (
+            <p className="text-sm text-rose-500">
+              {apt.status === "MISSED" ? "Token expired (shift ended)." : "Token marked absent/skipped."}
+            </p>
+          )}
         </div>
 
         <div className="space-y-5 lg:col-span-2">
@@ -98,7 +112,7 @@ export default function PatientDash() {
             <h3 className="mb-3 font-bold text-slate-900">Live status</h3>
             <div className="grid grid-cols-2 gap-3 text-sm">
               <Row label="Doctor status" value={<StatusBadge status={apt.doctorStatus || "ON_BREAK"} />} />
-              <Row label="Shift" value={apt.shift} />
+              <Row label="Shift" value={`${apt.shift} · ${apt.slotDate}`} />
               <Row label="Checked in" value={apt.checkedIn ? "✅ Yes" : "⏳ Not yet"} />
               <Row label="Emergency offset" value={`+${apt.delayMins} min`} />
             </div>

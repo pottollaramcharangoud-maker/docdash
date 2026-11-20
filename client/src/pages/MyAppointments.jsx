@@ -1,25 +1,26 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
-import { PageTitle, StatusBadge, WaitPill } from "../components/widgets.jsx";
+import { PageTitle, StatusBadge, WaitPill, Pagination } from "../components/widgets.jsx";
 
 export default function MyAppointments() {
   const [phone, setPhone] = useState(localStorage.getItem("dd_phone") || "");
-  const [list, setList] = useState(null);
+  const [result, setResult] = useState(null);
+  const [page, setPage] = useState(1);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  async function search(e) {
-    e.preventDefault();
+  async function search(targetPage = 1, targetPhone = phone) {
     setErr("");
     setBusy(true);
     try {
-      const rows = await api.myAppointments(phone.trim());
-      setList(rows);
-      localStorage.setItem("dd_phone", phone.trim());
+      const data = await api.myAppointments(targetPhone.trim(), targetPage, 10);
+      setResult(data);
+      setPage(targetPage);
+      localStorage.setItem("dd_phone", targetPhone.trim());
     } catch (e) {
       setErr(e.message);
-      setList([]);
+      setResult(null);
     } finally {
       setBusy(false);
     }
@@ -28,7 +29,13 @@ export default function MyAppointments() {
   return (
     <div>
       <PageTitle title="My Appointments" subtitle="Look up booked tokens by the mobile number used at booking." />
-      <form onSubmit={search} className="mb-6 flex max-w-md gap-2">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          search(1);
+        }}
+        className="mb-6 flex max-w-md gap-2"
+      >
         <input
           className="input"
           placeholder="Enter mobile number"
@@ -42,7 +49,7 @@ export default function MyAppointments() {
       {err && <p className="mb-4 text-sm text-rose-600">{err}</p>}
 
       <div className="space-y-3">
-        {list?.map((a) => (
+        {result?.items?.map((a) => (
           <Link
             key={a.id}
             to={`/appt/${a.id}`}
@@ -54,7 +61,7 @@ export default function MyAppointments() {
                 {a.isEmergency && " 🚨"}
               </p>
               <p className="text-sm text-slate-500">
-                {a.speciality} · {a.clinicName} ({a.clinicBranch}) · {a.shift}
+                {a.speciality} · {a.clinicName} ({a.clinicBranch}) · {a.shift} · {a.slotDate}
               </p>
               <p className="text-xs text-slate-400">Booked {a.createdAt}</p>
             </div>
@@ -64,14 +71,31 @@ export default function MyAppointments() {
             </div>
           </Link>
         ))}
-        {list && !list.length && (
+        {result && !result.items?.length && (
           <p className="py-8 text-center text-slate-400">No appointments found for this number.</p>
         )}
-        {!list && (
+        {!result && !err && (
           <p className="py-8 text-center text-slate-400">
-            Try demo number <button className="font-semibold text-clinic-600 underline"
-              onClick={() => { setPhone("9000000014"); }}>9000000014</button>
+            Try demo number{" "}
+            <button
+              className="font-semibold text-clinic-600 underline"
+              onClick={() => {
+                setPhone("9000000014");
+                search(1, "9000000014");
+              }}
+            >
+              9000000014
+            </button>
           </p>
+        )}
+        {result && (
+          <Pagination
+            page={result.page}
+            totalPages={result.totalPages}
+            total={result.total}
+            label="appointments"
+            onPage={(p) => search(p)}
+          />
         )}
       </div>
     </div>

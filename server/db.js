@@ -1,13 +1,18 @@
+// Database bootstrap — schema, migration, indexes, seed
+// DB path is overridable via DB_PATH for isolated test databases.
+
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { log } from "./logger.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const db = new DatabaseSync(path.join(__dirname, "docdash.db"));
+const dbPath = process.env.DB_PATH || path.join(__dirname, "docdash.db");
+const db = new DatabaseSync(dbPath);
+
+db.exec("PRAGMA foreign_keys = ON;");
 
 db.exec(`
-  PRAGMA foreign_keys = ON;
-
   CREATE TABLE IF NOT EXISTS specialities (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE
@@ -39,10 +44,11 @@ db.exec(`
     doctor_id INTEGER NOT NULL REFERENCES doctors(id),
     clinic_id INTEGER NOT NULL REFERENCES clinics(id),
     shift TEXT NOT NULL CHECK (shift IN ('MORNING','EVENING')),
+    slot_date TEXT NOT NULL DEFAULT (date('now')),
     patient_name TEXT NOT NULL,
     patient_phone TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'WAITING'
-      CHECK (status IN ('WAITING','IN_CONSULTATION','COMPLETED','SKIPPED')),
+      CHECK (status IN ('WAITING','IN_CONSULTATION','COMPLETED','SKIPPED','MISSED')),
     is_emergency INTEGER NOT NULL DEFAULT 0,
     checked_in INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -86,6 +92,82 @@ db.exec(`
   );
 `);
 
+// ---------- migration: v1 (no slot_date, no MISSED) → v2 ----------
+
+function migrateIfNeeded() {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='appointments'")
+    .get();
+  if (!row?.sql || row.sql.includes("slot_date")) return;
+
+  log.info("db_migration", { from: "v1", to: "v2" });
+  db.exec("PRAGMA foreign_keys = OFF");
+  db.exec("BEGIN");
+  try {
+    db.exec(`
+      CREATE TABLE appointments_v2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_no INTEGER NOT NULL,
+        doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+        clinic_id INTEGER NOT NULL REFERENCES clinics(id),
+        shift TEXT NOT NULL CHECK (shift IN ('MORNING','EVENING')),
+        slot_date TEXT NOT NULL DEFAULT (date('now')),
+        patient_name TEXT NOT NULL,
+        patient_phone TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'WAITING'
+          CHECK (status IN ('WAITING','IN_CONSULTATION','COMPLETED','SKIPPED','MISSED')),
+        is_emergency INTEGER NOT NULL DEFAULT 0,
+        checked_in INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        started_at TEXT,
+        ended_at TEXT,
+        prescription TEXT,
+        prescription_file TEXT,
+        sms_sent INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO appointments_v2
+        (id, token_no, doctor_id, clinic_id, shift, patient_name, patient_phone,
+         status, is_emergency, checked_in, created_at, started_at, ended_at,
+         prescription, prescription_file, sms_sent)
+      SELECT id, token_no, doctor_id, clinic_id, shift, patient_name, patient_phone,
+             status, is_emergency, checked_in, created_at, started_at, ended_at,
+             prescription, prescription_file, sms_sent
+      FROM appointments;
+      DROP TABLE appointments;
+      ALTER TABLE appointments_v2 RENAME TO appointments;
+    `);
+    db.exec("COMMIT");
+    log.info("db_migration_done", { table: "appointments" });
+  } catch (e) {
+    db.exec("ROLLBACK");
+    log.error("db_migration_failed", { message: e.message });
+    throw e;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+migrateIfNeeded();
+
+// ---------- explicit indexes for query patterns ----------
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_apt_doctor_shift_date
+    ON appointments(doctor_id, shift, slot_date, status);
+  CREATE INDEX IF NOT EXISTS idx_apt_phone
+    ON appointments(patient_phone);
+  CREATE INDEX IF NOT EXISTS idx_apt_status_date
+    ON appointments(status, slot_date);
+  CREATE INDEX IF NOT EXISTS idx_consult_doctor_time
+    ON consult_log(doctor_id, ended_at);
+  CREATE INDEX IF NOT EXISTS idx_wait_history_lookup
+    ON wait_history(clinic_id, day_of_week, hour);
+  CREATE INDEX IF NOT EXISTS idx_sms_appointment
+    ON sms_log(appointment_id);
+`);
+
+// ---------- seed (only on a fresh/empty database) ----------
+
 const alreadySeeded = db.prepare("SELECT COUNT(*) AS c FROM clinics").get().c > 0;
 
 function seed() {
@@ -99,13 +181,12 @@ function seed() {
     const insClinic = db.prepare(
       "INSERT INTO clinics (name, branch, address, city, lat, lng) VALUES (?,?,?,?,?,?)"
     );
-    const clinics = [
+    [
       ["CityCare Multispeciality", "Downtown", "12 MG Road", "Hyderabad", 17.385, 78.4867],
       ["CityCare Multispeciality", "North", "45 Kukatpally Main Rd", "Hyderabad", 17.4849, 78.4138],
       ["HealthFirst Clinic", "East", "9 Gachibowli Loop", "Hyderabad", 17.4401, 78.3489],
       ["HealthFirst Clinic", "West", "22 Madhapur Circle", "Hyderabad", 17.4375, 78.3963],
-    ];
-    clinics.forEach((c) => insClinic.run(...c));
+    ].forEach((c) => insClinic.run(...c));
 
     const specIds = Object.fromEntries(
       db.prepare("SELECT id, name FROM specialities").all().map((r) => [r.name, r.id])
@@ -113,7 +194,7 @@ function seed() {
     const insDoc = db.prepare(
       "INSERT INTO doctors (name, speciality_id, clinic_id, fee, avg_mins, bio) VALUES (?,?,?,?,?,?)"
     );
-    const doctors = [
+    [
       ["Dr. A. Mehta", specIds["Cardiology"], 1, 800, 12, "Interventional cardiology, 18 yrs experience"],
       ["Dr. R. Kapoor", specIds["Cardiology"], 3, 750, 14, "Heart failure & preventive cardiology"],
       ["Dr. S. Sharma", specIds["General Medicine"], 1, 500, 10, "Family medicine & chronic care"],
@@ -122,73 +203,73 @@ function seed() {
       ["Dr. M. Singh", specIds["Pediatrics"], 4, 550, 10, "Pediatric allergies & immunisation"],
       ["Dr. V. Iyer", specIds["Orthopedics"], 3, 700, 15, "Sports injuries & joint replacement"],
       ["Dr. D. Gupta", specIds["Orthopedics"], 4, 650, 13, "Spine care & fracture management"],
-    ];
-    doctors.forEach((d) => insDoc.run(...d));
+    ].forEach((d) => insDoc.run(...d));
 
     const insState = db.prepare(
       "INSERT INTO doctor_state (doctor_id, status, active_appointment_id, delay_mins) VALUES (?,?,?,?)"
     );
     for (let id = 1; id <= 8; id++) insState.run(id, "ON_BREAK", null, 0);
 
-    // Dr. Mehta (1) MORNING: tokens 1-16 -> 1-10 completed, 11 in consultation, 12-16 waiting
-    const insApt = db.prepare(
-      `INSERT INTO appointments
-       (token_no, doctor_id, clinic_id, shift, patient_name, patient_phone, status, checked_in, created_at, started_at, ended_at)
-       VALUES (?,?,?,?,?,?,?,?,datetime('now','-120 minutes'),?,?)`
-    );
     const mehtaNames = [
       "Ramesh Kumar", "Sita Devi", "Anil Verma", "Fatima Sheikh", "John D'Souza",
       "Lakshmi Rao", "Vijay Patil", "Neha Joshi", "Suresh Babu", "Amina Begum",
       "Rahul Mehta", "Divya Menon", "Karthik Nair", "Priya Sharma", "Arun Kumar",
       "Sneha Reddy",
     ];
-    // completed tokens 1-10
     for (let t = 1; t <= 10; t++) {
-      const started = `datetime('now', '-${140 - t * 10} minutes')`;
-      const ended = `datetime('now', '-${130 - t * 10} minutes')`;
       db.prepare(
         `INSERT INTO appointments
-         (token_no, doctor_id, clinic_id, shift, patient_name, patient_phone, status, checked_in, created_at, started_at, ended_at)
-         VALUES (?,?,1,'MORNING',?,?,'COMPLETED',1,datetime('now','-150 minutes'),${started},${ended})`
-      ).run(t, 1, mehtaNames[t - 1], `90000000${String(t).padStart(2, "0")}`);
+         (token_no, doctor_id, clinic_id, shift, patient_name, patient_phone, status, checked_in,
+          created_at, started_at, ended_at)
+         VALUES (?,?,1,'MORNING',?,?,'COMPLETED',1,datetime('now','-150 minutes'),
+                 datetime('now', ?), datetime('now', ?))`
+      ).run(t, 1, mehtaNames[t - 1], `90000000${String(t).padStart(2, "0")}`,
+        `-${140 - t * 10} minutes`, `-${130 - t * 10} minutes`);
     }
-    // token 11 in consultation (started 8 mins ago)
-    insApt.run(11, 1, 1, "MORNING", mehtaNames[10], "9000000011", "IN_CONSULTATION", 1,
-      "datetime('now','-8 minutes')", null);
     db.prepare(
-      "UPDATE appointments SET started_at = datetime('now','-8 minutes') WHERE token_no = 11 AND doctor_id = 1"
-    ).run();
-    // tokens 12-16 waiting
+      `INSERT INTO appointments
+       (token_no, doctor_id, clinic_id, shift, patient_name, patient_phone, status, checked_in,
+        created_at, started_at)
+       VALUES (11, 1, 1, 'MORNING', ?, '9000000011', 'IN_CONSULTATION', 1,
+               datetime('now','-120 minutes'), datetime('now','-8 minutes'))`
+    ).run(mehtaNames[10]);
     for (let t = 12; t <= 16; t++) {
-      insApt.run(t, 1, 1, "MORNING", mehtaNames[t - 1], `90000000${t}`, "WAITING", 1, null, null);
+      db.prepare(
+        `INSERT INTO appointments
+         (token_no, doctor_id, clinic_id, shift, patient_name, patient_phone, status, checked_in,
+          created_at)
+         VALUES (?,?,1,'MORNING',?,?,'WAITING',1,datetime('now','-30 minutes'))`
+      ).run(t, 1, mehtaNames[t - 1], `90000000${t}`);
     }
     db.prepare(
-      "UPDATE doctor_state SET status='IN_CONSULTATION', active_appointment_id=(SELECT id FROM appointments WHERE doctor_id=1 AND token_no=11), updated_at=datetime('now') WHERE doctor_id=1"
+      `UPDATE doctor_state SET status='IN_CONSULTATION',
+       active_appointment_id=(SELECT id FROM appointments WHERE doctor_id=1 AND token_no=11),
+       updated_at=datetime('now') WHERE doctor_id=1`
     ).run();
 
-    // Dr. Sharma (3) MORNING at clinic 1: tokens 1-4 waiting (consult log below)
     for (let t = 1; t <= 4; t++) {
-      insApt.run(t, 3, 1, "MORNING", `Patient S${t}`, `910000000${t}`, "WAITING", 1, null, null);
+      db.prepare(
+        `INSERT INTO appointments
+         (token_no, doctor_id, clinic_id, shift, patient_name, patient_phone, status, checked_in,
+          created_at)
+         VALUES (?,?,1,'MORNING',?,?,'WAITING',1,datetime('now','-30 minutes'))`
+      ).run(t, 3, `Patient S${t}`, `910000000${t}`);
     }
     db.prepare(
       "UPDATE doctor_state SET status='ON_BREAK', updated_at=datetime('now') WHERE doctor_id=3"
     ).run();
 
-    // consult history for EWMA: Dr. Mehta last 5 = 11,13,12,12,12 -> EWMA ~12
     const insLog = db.prepare(
       "INSERT INTO consult_log (doctor_id, mins, ended_at) VALUES (?,?,datetime('now', ?))"
     );
-    [[1, 13, "-70 minutes"], [1, 11, "-55 minutes"], [1, 14, "-40 minutes"],
-     [1, 11, "-25 minutes"], [1, 12, "-15 minutes"], [1, 12, "-5 minutes"]].forEach(([d, m, off]) =>
-      insLog.run(d, m, off)
-    );
-    [[3, 9, "-50 minutes"], [3, 11, "-30 minutes"], [3, 10, "-10 minutes"],
-     [5, 8, "-45 minutes"], [5, 10, "-20 minutes"],
-     [7, 14, "-35 minutes"], [7, 16, "-12 minutes"]].forEach(([d, m, off]) =>
-      insLog.run(d, m, off)
-    );
+    [
+      [1, 13, "-70 minutes"], [1, 11, "-55 minutes"], [1, 14, "-40 minutes"],
+      [1, 11, "-25 minutes"], [1, 12, "-15 minutes"], [1, 12, "-5 minutes"],
+      [3, 9, "-50 minutes"], [3, 11, "-30 minutes"], [3, 10, "-10 minutes"],
+      [5, 8, "-45 minutes"], [5, 10, "-20 minutes"],
+      [7, 14, "-35 minutes"], [7, 16, "-12 minutes"],
+    ].forEach(([d, m, off]) => insLog.run(d, m, off));
 
-    // wait history for heatmap: 4 weeks x 7 days x hours 9-19
     const insHist = db.prepare(
       "INSERT INTO wait_history (clinic_id, doctor_id, day_of_week, hour, avg_wait_mins) VALUES (?,?,?,?,?)"
     );
@@ -204,6 +285,7 @@ function seed() {
       }
     }
     db.exec("COMMIT");
+    log.info("db_seeded", { clinics: 4, doctors: 8 });
   } catch (e) {
     db.exec("ROLLBACK");
     throw e;

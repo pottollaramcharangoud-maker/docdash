@@ -1,22 +1,28 @@
-import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, usePoll } from "../api.js";
-import { PageTitle, StatusBadge, TokenRing, WaitPill } from "../components/widgets.jsx";
+import { api } from "../api.js";
+import { useLive } from "../hooks/useLive.js";
+import { PageTitle, StatusBadge, TokenRing, WaitPill, LiveBadge } from "../components/widgets.jsx";
 
 export default function DoctorProfile() {
   const { id } = useParams();
-  const [doc, setDoc] = useState(null);
-  const { data: queue } = usePoll(() => api.queue(id, "MORNING"), 3000);
 
-  useEffect(() => {
-    api.doctor(id).then(setDoc).catch(() => {});
-  }, [id]);
+  const { data: doc } = useLive(() => api.doctor(id), { interval: 30000 });
+  const { data: queue, live } = useLive(() => api.queue(id, "MORNING"), {
+    interval: 3000,
+    doctorId: Number(id),
+  });
 
   if (!doc) return <p className="text-slate-400">Loading…</p>;
 
   return (
     <div>
-      <PageTitle title={doc.name} subtitle={`${doc.speciality} · ${doc.clinic_name} — ${doc.clinic_branch}`} />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <PageTitle
+          title={doc.name}
+          subtitle={`${doc.speciality} · ${doc.clinic_name} — ${doc.clinic_branch}`}
+        />
+        <LiveBadge live={live} />
+      </div>
       <div className="grid gap-5 lg:grid-cols-3">
         <div className="card lg:col-span-2 space-y-4">
           <div className="flex items-center gap-4">
